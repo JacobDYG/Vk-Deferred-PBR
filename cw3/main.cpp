@@ -164,6 +164,19 @@ namespace
 		int reflectionModel = glsl::PBR_PHONG;
 	};
 
+	struct FrameBufferAttachment {
+		lut::Image image;
+		lut::ImageView view;
+		VkFormat format;
+	};
+	struct OffscreenFrameBuffer {
+		int32_t width, height;
+		lut::Framebuffer frameBuffer;
+		FrameBufferAttachment passthru;
+		FrameBufferAttachment depth;
+		lut::RenderPass renderPass;
+	};
+
 	// Local functions:
 	void glfw_callback_key_press(GLFWwindow*, int, int, int, int);
 	void glfw_callback_mouse_click(GLFWwindow* window, int button, int action, int mods);
@@ -192,6 +205,22 @@ namespace
 		VkRenderPass,
 		std::vector<lut::Framebuffer>&,
 		VkImageView aDepthView
+	);
+
+	void create_offscreen_buffer(
+		lut::Allocator const& aAllocator,
+		lut::VulkanContext const& aContext,
+		lut::VulkanWindow const& aWindow,
+		OffscreenFrameBuffer& aOffscreenFrameBuffer
+	);
+
+	void create_attachment(
+		lut::Allocator const& aAllocator,
+		lut::VulkanContext const& aContext,
+		VkFormat aFormat,
+		VkImageUsageFlagBits aUsageMask,
+		FrameBufferAttachment& aFrameBufferAttachment,
+		OffscreenFrameBuffer const& aOffscreenFrameBuffer
 	);
 
 	void update_scene_uniforms(
@@ -260,6 +289,10 @@ int main() try
 
 	// Create depth buffer
 	auto [depthBuffer, depthBufferView] = create_depth_buffer(window, allocator);
+	
+	// Offscreen buffer
+	OffscreenFrameBuffer offscreenBuffer;
+	create_offscreen_buffer(window, offscreenBuffer);
 
 	std::vector<lut::Framebuffer> framebuffers;
 	create_swapchain_framebuffers(window, offscreenPass.handle, framebuffers, depthBufferView.handle);
@@ -1229,6 +1262,90 @@ namespace
 		}
 
 		assert(aWindow.swapViews.size() == aFramebuffers.size());
+	}
+
+	void create_offscreen_buffer(lut::Allocator const& aAllocator, lut::VulkanContext const& aContext, lut::VulkanWindow const& aWindow, OffscreenFrameBuffer& aOffscreenFrameBuffer)
+	{
+		aOffscreenFrameBuffer.width = aWindow.swapchainExtent.width;
+		aOffscreenFrameBuffer.height = aWindow.swapchainExtent.height;
+
+		// Single colour attachment for passthru
+		create_attachment(aAllocator, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, aOffscreenFrameBuffer.passthru, aOffscreenFrameBuffer);
+
+		// TODO: move DEPTH creation here
+	}
+
+	void create_attachment(lut::Allocator const& aAllocator, lut::VulkanContext const& aContext, VkFormat aFormat, VkImageUsageFlagBits aUsageMask, FrameBufferAttachment& aFrameBufferAttachment, OffscreenFrameBuffer const& aOffscreenFrameBuffer)
+	{
+		// Create the image
+		aFrameBufferAttachment.format = aFormat;
+		VkImageAspectFlags aspectMask = 0;
+		VkImageLayout imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+		if (aUsageMask & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+		{
+			aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		}
+		if (aUsageMask & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+		{
+			aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+			imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		}
+
+		VkImageCreateInfo imageInfo{};
+		imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.format = aFormat;
+		imageInfo.extent.width = aOffscreenFrameBuffer.width;
+		imageInfo.extent.height = aOffscreenFrameBuffer.height;
+		imageInfo.extent.depth = 1;
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.usage = aUsageMask | VK_IMAGE_USAGE_SAMPLED_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;	// = 0, hence many examples omit this as zeroing the struct gives this implicitly
+		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+		VmaAllocationCreateInfo allocInfo{};
+		allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+		VkImage image = VK_NULL_HANDLE;
+		VmaAllocation allocation = VK_NULL_HANDLE;
+
+		if (auto const res = vmaCreateImage(aAllocator.allocator, &imageInfo, &allocInfo, &image, &allocation, nullptr); VK_SUCCESS != res)
+		{
+			throw lut::Error("Unable to allocate image.\n"
+				"vmaCreateImage() returned %s", lut::to_string(res).c_str()
+			);
+		}
+
+		aFrameBufferAttachment.image = lut::Image(aAllocator.allocator, image, allocation);
+
+		// Create the image view
+		VkImageViewCreateInfo imageViewCreateInfo{};
+		imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		imageViewCreateInfo.image = aFrameBufferAttachment.image.image;
+		imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		imageViewCreateInfo.format = aFormat;
+		imageViewCreateInfo.components = VkComponentMapping{}; // == identity
+		//imageViewCreateInfo.subresourceRange = range;
+		imageViewCreateInfo.subresourceRange = VkImageSubresourceRange{
+			VK_IMAGE_ASPECT_COLOR_BIT,
+			0, VK_REMAINING_MIP_LEVELS,
+			0, 1
+		};
+
+		// Finally, create the view
+		VkImageView view = VK_NULL_HANDLE;
+		if (auto const res = vkCreateImageView(aContext.device, &imageViewCreateInfo, nullptr, &view); VK_SUCCESS != res)
+		{
+			throw lut::Error("Unable to create image view\n"
+				"vkCreateImageView() returned %s", lut::to_string(res).c_str());
+		}
+
+		aFrameBufferAttachment.view = lut::ImageView(aContext.device, view);
 	}
 
 	lut::DescriptorSetLayout create_scene_descriptor_layout(lut::VulkanWindow const& aWindow)
