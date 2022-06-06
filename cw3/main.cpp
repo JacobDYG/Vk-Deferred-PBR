@@ -96,32 +96,6 @@ namespace
 		static_assert(sizeof(SceneUniform) % 4 == 0, "SceneUniform must be a multiple of 4 bytes");
 	}
 	
-	//namespace glsl
-	//{
-	//	struct MaterialUniform
-	//	{
-	//		glm::vec4 color;
-	//	};
-	//	static_assert(sizeof(MaterialUniform) <= 65536, "MaterialUniform must be less than 65536 bytes for vkCmdUpdateBuffer");
-	//	static_assert(sizeof(MaterialUniform) % 4 == 0, "MaterialUniform must be a multiple of 4 bytes");
-	//}
-	
-	//namespace glsl
-	//{
-	//	struct MaterialUniform
-	//	{
-	//		// Note: must map to the std140 uniform interface in the fragment
-	//		// shader, so need to be careful about the packing/alignment here!
-	//		glm::vec4 emissive;
-	//		glm::vec4 diffuse;
-	//		glm::vec4 specular;
-	//		float shininess;
-	//	};
-	//	static_assert(sizeof(MaterialUniform) <= 65536, "MaterialUniform must be less than 65536 bytes for vkCmdUpdateBuffer");
-	//	static_assert(sizeof(MaterialUniform) % 4 == 0, "MaterialUniform must be a multiple of 4 bytes");
-	//}
-	// For PBR (see PBR.frag):
-	
 	namespace glsl
 	{
 		struct MaterialUniform
@@ -159,8 +133,8 @@ namespace
 	// Local types/structures:
 	struct GPUMaterialInfo
 	{
-		VkPipeline* pipe;
-		VkPipelineLayout* pipeLayout;
+		const VkPipeline* pipe;
+		const VkPipelineLayout* pipeLayout;
 		labutils::Buffer materialBuffer;
 		VkDescriptorSet materialDescriptor;
 	};
@@ -196,12 +170,16 @@ namespace
 	void glfw_callback_mouse_move(GLFWwindow*, double, double);
 
 	// Helpers:
-	lut::RenderPass create_render_pass(lut::VulkanWindow const&);
+	lut::RenderPass create_offscreen_render_pass(lut::VulkanWindow const&);
 
 	lut::DescriptorSetLayout create_scene_descriptor_layout(lut::VulkanWindow const&);
 	lut::DescriptorSetLayout create_defaultobject_descriptor_layout(lut::VulkanWindow const&);
 	lut::DescriptorSetLayout create_light_descriptor_layout(lut::VulkanWindow const&);
+	
+	lut::Buffer prepare_scene_buffer(lut::VulkanWindow const& aWindow, lut::Allocator const& aAllocator, VkDescriptorSet const& aSceneDescriptors);
+	lut::Buffer prepare_light_buffer(lut::VulkanWindow const& aWindow, lut::Allocator const& aAllocator, VkDescriptorSet const& aLightDescriptors, glsl::LightUniform& aLightUniform);
 
+	std::vector<GPUModel> load_models(lut::VulkanWindow const& aWindow, lut::Allocator const& aAllocator, lut::DescriptorPool const& aDescriptorPool, lut::DescriptorSetLayout const& aObjectLayout, lut::PipelineLayout const& aPipelineLayout, lut::Pipeline const& aPipeline);
 	GPUModel load_gpu_model(labutils::VulkanContext const& aContext, labutils::Allocator const& aAllocator, ModelData& model, std::vector<GPUMaterialInfo>&& materials);
 
 	lut::PipelineLayout create_pipeline_layout(lut::VulkanContext const& aContext, std::vector<VkDescriptorSetLayout> descriptorSetlayouts);
@@ -277,13 +255,14 @@ int main() try
 	lut::Allocator allocator = lut::create_allocator(window);
 
 	// Intialize resources
-	lut::RenderPass renderPass = create_render_pass(window);
+	// Offscreen pass
+	lut::RenderPass offscreenPass = create_offscreen_render_pass(window);
 
 	// Create depth buffer
 	auto [depthBuffer, depthBufferView] = create_depth_buffer(window, allocator);
 
 	std::vector<lut::Framebuffer> framebuffers;
-	create_swapchain_framebuffers(window, renderPass.handle, framebuffers, depthBufferView.handle);
+	create_swapchain_framebuffers(window, offscreenPass.handle, framebuffers, depthBufferView.handle);
 
 	lut::CommandPool cpool = lut::create_command_pool(window, VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
 
@@ -323,278 +302,19 @@ int main() try
 
 	// Create pipelines for each
 	lut::PipelineLayout defaultPipeLayout = create_pipeline_layout(window, descriptorSetLayouts);
-	lut::Pipeline defaultPipeline = create_pipeline(window, renderPass.handle, defaultPipeLayout.handle, cfg::kVertShaderPath, cfg::kFragShaderPath);
+	lut::Pipeline defaultPipeline = create_pipeline(window, offscreenPass.handle, defaultPipeLayout.handle, cfg::kVertShaderPath, cfg::kFragShaderPath);
 
-	// Allocate the set for scene and light, each mesh will have its own set
+	// Load models
+	std::vector<GPUModel> models = load_models(window, allocator, descPool, defaultObjectLayout, defaultPipeLayout, defaultPipeline);
+
+	// Create scene desc set
 	VkDescriptorSet sceneDescriptors = lut::alloc_desc_set(window, descPool.handle, sceneLayout.handle);
+	lut::Buffer sceneUBO = prepare_scene_buffer(window, allocator, sceneDescriptors);
 
-
-	// Loading models
-	std::vector<GPUModel> models;
-	models.reserve(cfg::kModels.size());
-	for (auto& modelPath : cfg::kModels)
-	{
-		auto model = load_obj_model(modelPath);
-		// Populate materials
-		std::vector<GPUMaterialInfo> materials;
-		materials.reserve(model.materials.size());
-		for (auto& materialInfo : model.materials)
-		{
-			// Get the material in suitable format for uniform
-			// Color only, debug visualisations
-			//glsl::MaterialUniform material = { glm::vec4(materialInfo.color, 1.0f) };
-
-			// For Blinn-Phong
-			//glsl::MaterialUniform material = {	glm::vec4(materialInfo.emissive, 1.0f),
-			//									glm::vec4(materialInfo.diffuse, 1.0f),
-			//									glm::vec4(materialInfo.specular, 1.0f),
-			//									materialInfo.shininess };
-
-			// For PBR
-			glsl::MaterialUniform material = {	glm::vec4(materialInfo.emissive, 1.0f),
-												glm::vec4(materialInfo.albedo, 1.0f),
-												materialInfo.shininess,
-												materialInfo.metalness };
-
-			// Allocate a descriptor set for this material
-			VkDescriptorSet matDescSet;
-			lut::Buffer matUBO;
-			VkPipeline* pipe;
-			VkPipelineLayout* pipeLayout;
-
-			matDescSet = lut::alloc_desc_set(window, descPool.handle, defaultObjectLayout.handle);
-
-			// Set appropriate pipeline pointers for no textures
-			pipe = &defaultPipeline.handle;
-			pipeLayout = &defaultPipeLayout.handle;
-
-			// Transfer material uniform
-			{
-				// Initialise it
-				matUBO = lut::create_buffer(
-					allocator,
-					sizeof(glsl::MaterialUniform),
-					VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-					VMA_MEMORY_USAGE_GPU_ONLY
-				);
-				// Staging buffer, which will be used to transfer data from the CPU to the GPU
-				lut::Buffer matUBOStaging = lut::create_buffer(
-					allocator,
-					sizeof(glsl::MaterialUniform),
-					VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-					VMA_MEMORY_USAGE_CPU_TO_GPU
-				);
-				VkWriteDescriptorSet writeDesc[1]{};
-
-				VkDescriptorBufferInfo bufferInfo{};
-				bufferInfo.buffer = matUBO.buffer;
-				bufferInfo.range = VK_WHOLE_SIZE;
-
-				writeDesc[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-				writeDesc[0].dstSet = matDescSet;
-				writeDesc[0].dstBinding = 1;
-				writeDesc[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-				writeDesc[0].descriptorCount = 1;
-				writeDesc[0].pBufferInfo = &bufferInfo;
-
-				constexpr auto numSets = sizeof(writeDesc) / sizeof(writeDesc[0]);
-				vkUpdateDescriptorSets(window.device, numSets, writeDesc, 0, nullptr);
-
-				// Write to the new uniform
-				void* uniformPtr = nullptr;
-				if (auto const res = vmaMapMemory(allocator.allocator, matUBOStaging.allocation, &uniformPtr); VK_SUCCESS != res)
-				{
-					throw lut::Error("Error mapping memory for writing\n"
-						"vmaMapMemory() returned %s", lut::to_string(res).c_str()
-					);
-				}
-
-				std::memcpy(uniformPtr, &material, sizeof(glsl::MaterialUniform));
-				vmaUnmapMemory(allocator.allocator, matUBOStaging.allocation);
-
-				// Now, we need to prepare to issue the transfer commands that will copy the data from the staging buffers to the GPU buffers
-				// We need a fence to block here while the Vulkan commands are executed. We don't want to delete the resources while
-				// ..the gpu is still using them...
-				lut::Fence uploadComplete = create_fence(window);
-
-				// Queue data uploads from staging buffers to the final buffers
-				// This uses a seperate command pool for simplicity
-				lut::CommandPool uploadPool = create_command_pool(window);
-				VkCommandBuffer uploadCmd = alloc_command_buffer(window, uploadPool.handle);
-
-				// Record the copy commands into the buffer
-				VkCommandBufferBeginInfo beginInfo{};
-				beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-				beginInfo.flags = 0;
-				beginInfo.pInheritanceInfo = nullptr;
-
-				if (auto const res = vkBeginCommandBuffer(uploadCmd, &beginInfo); VK_SUCCESS != res)
-				{
-					throw lut::Error("Beginning command buffer recording\n"
-						"vkBeginCommandBuffer() returned %s", lut::to_string(res).c_str()
-					);
-				}
-
-				VkBufferCopy matUBOCopy{};
-				matUBOCopy.size = sizeof(glsl::MaterialUniform);
-
-				lut::buffer_barrier(uploadCmd,
-					matUBO.buffer,
-					VK_ACCESS_UNIFORM_READ_BIT,
-					VK_ACCESS_TRANSFER_WRITE_BIT,
-					VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-					VK_PIPELINE_STAGE_TRANSFER_BIT
-				);
-
-				vkCmdCopyBuffer(uploadCmd, matUBOStaging.buffer, matUBO.buffer, 1, &matUBOCopy);
-
-				lut::buffer_barrier(uploadCmd,
-					matUBO.buffer,
-					VK_ACCESS_TRANSFER_WRITE_BIT,
-					VK_ACCESS_UNIFORM_READ_BIT,
-					VK_PIPELINE_STAGE_TRANSFER_BIT,
-					VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-				);
-
-				if (auto const res = vkEndCommandBuffer(uploadCmd); VK_SUCCESS != res)
-				{
-					throw lut::Error("Ending command buffer recording\n"
-						"vkEndCommandBuffer() returned %s", lut::to_string(res).c_str()
-					);
-				}
-
-				VkSubmitInfo submitInfo{};
-				submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-				submitInfo.commandBufferCount = 1;
-				submitInfo.pCommandBuffers = &uploadCmd;
-
-				if (auto const res = vkQueueSubmit(window.graphicsQueue, 1, &submitInfo, uploadComplete.handle); VK_SUCCESS != res)
-				{
-					throw lut::Error("SUbmitting commands\n"
-						"vkQueueSubmit() returned %s", lut::to_string(res).c_str()
-					);
-				}
-
-				// Wait for commands to finish before destroying the temp resources
-				// We don't need to destroy them explicitly, they are handled by their respective destructors
-				// But we do need to block here until we are ready for these to be called
-				if (auto const res = vkWaitForFences(window.device, 1, &uploadComplete.handle, VK_TRUE, std::numeric_limits<std::uint64_t>::max()); VK_SUCCESS != res)
-				{
-					throw lut::Error("Waiting for upload to complete\n"
-						"vkWaitForFences() returned %s", lut::to_string(res).c_str()
-					);
-				}
-			}
-
-			// Pass ownership to GPUMaterialInfo
-			materials.emplace_back(
-				GPUMaterialInfo{
-					pipe,
-					pipeLayout,
-					std::move(matUBO),
-					std::move(matDescSet)
-				}
-			);
-
-			// materials.emplace_back(materialInfo.color);
-		}
-
-		// Send to gpu buffers
-		models.push_back(load_gpu_model(window, allocator, model, std::move(materials)));
-	}
-
+	// Create lights
 	VkDescriptorSet lightDescriptors = lut::alloc_desc_set(window, descPool.handle, lightLayout.handle);
-
-	// Create UBO for projection matrix
-	lut::Buffer sceneUBO = lut::create_buffer(
-		allocator,
-		sizeof(glsl::SceneUniform),
-		VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-		VMA_MEMORY_USAGE_CPU_TO_GPU
-	);
-
-	// Initialize scene descriptor set with vkUpdateDescriptorSets
-	// Write to the descriptor set to specify its details
-	{
-		VkWriteDescriptorSet desc[1]{};
-
-		VkDescriptorBufferInfo sceneUboInfo{};
-		sceneUboInfo.buffer = sceneUBO.buffer;
-		sceneUboInfo.range = VK_WHOLE_SIZE;
-
-		desc[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		desc[0].dstSet = sceneDescriptors;
-		desc[0].dstBinding = 0;
-		desc[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		desc[0].descriptorCount = 1;
-		desc[0].pBufferInfo = &sceneUboInfo;
-
-
-		constexpr auto numSets = sizeof(desc) / sizeof(desc[0]);
-		vkUpdateDescriptorSets(window.device, numSets, desc, 0, nullptr);
-	}
-
-	// Create UBO for light matrix
-	lut::Buffer lightUBO = lut::create_buffer(
-		allocator,
-		sizeof(glsl::LightUniform),
-		VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-		VMA_MEMORY_USAGE_CPU_TO_GPU
-	);
-
-	// Initialise light descriptor set with vkUpdateDescriptorSets
-	{
-		VkWriteDescriptorSet desc[1]{};
-
-		VkDescriptorBufferInfo lightUboInfo{};
-		lightUboInfo.buffer = lightUBO.buffer;
-		lightUboInfo.range = VK_WHOLE_SIZE;
-
-		desc[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		desc[0].dstSet = lightDescriptors;
-		desc[0].dstBinding = 2;
-		desc[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		desc[0].descriptorCount = 1;
-		desc[0].pBufferInfo = &lightUboInfo;
-
-
-		constexpr auto numSets = sizeof(desc) / sizeof(desc[0]);
-		vkUpdateDescriptorSets(window.device, numSets, desc, 0, nullptr);
-	}
-
-	// Create a sphere from which to sample light positions
-	cfg::Sphere sphere = {	glm::vec3(0.0f),
-							7.0f };
-
-	// Create random sampler
-	std::random_device randomDevice;
-	std::default_random_engine randomEngine(randomDevice());
-	std::uniform_real_distribution<> uniformDistribution(0.0f, 360.0f);
-
 	glsl::LightUniform lightUniforms{};
-	lightUniforms.ambientColor = glm::vec4(0.02f, 0.02f, 0.02f, 1.0f);
-
-	float theta = 0.0f, phi = 0.0f;
-
-	for (size_t i = 0; i < glsl::MAX_LIGHTS; i++)
-	{
-		theta = uniformDistribution(randomEngine);
-		phi = uniformDistribution(randomEngine);
-		// Sample a new point from the sphere and make a light
-		glm::vec3 cartesian =	sphere.center +
-								glm::vec3(	sphere.radius * sin(phi) * cos(theta),
-											sphere.radius * sin(phi) * sin(theta),
-											sphere.radius * cos(phi)
-		);
-
-		// Add the light to the UBO
-		lightUniforms.lights[i] = { glm::vec4(cartesian, 1.0f),
-									glm::vec4((bool)(1 & (i + 1)), (bool)(2 & (i + 1)), (bool)(4 & (i + 1)), 1.0f)
-		};
-
-		lightUniforms.numLights++;
-		lightState.numLightsEnabled = lightUniforms.numLights;
-	}
+	lut::Buffer lightUBO = prepare_light_buffer(window, allocator, lightDescriptors, lightUniforms);
 
 	// Application main loop
 	bool recreateSwapchain = false;
@@ -621,17 +341,17 @@ int main() try
 
 			if (changes.changedFormat)
 			{
-				renderPass = create_render_pass(window);
+				offscreenPass = create_offscreen_render_pass(window);
 			}
 
 			if (changes.changedSize)
 			{
 				std::tie(depthBuffer, depthBufferView) = create_depth_buffer(window, allocator);
-				defaultPipeline = create_pipeline(window, renderPass.handle, defaultPipeLayout.handle, cfg::kVertShaderPath, cfg::kFragShaderPath);
+				defaultPipeline = create_pipeline(window, offscreenPass.handle, defaultPipeLayout.handle, cfg::kVertShaderPath, cfg::kFragShaderPath);
 			}
 
 			framebuffers.clear();
-			create_swapchain_framebuffers(window, renderPass.handle, framebuffers, depthBufferView.handle);
+			create_swapchain_framebuffers(window, offscreenPass.handle, framebuffers, depthBufferView.handle);
 
 			recreateSwapchain = false;
 			continue;
@@ -707,7 +427,7 @@ int main() try
 
 		record_commands(
 			cbuffers[imageIndex],
-			renderPass.handle,
+			offscreenPass.handle,
 			framebuffers[imageIndex].handle,
 			defaultPipeline.handle,
 			defaultPipeLayout.handle,
@@ -932,6 +652,274 @@ namespace
 		mainCamera.mCameraFront = glm::normalize(direction);
 	}
 
+	std::vector<GPUModel> load_models(lut::VulkanWindow const& aWindow, lut::Allocator const& aAllocator, lut::DescriptorPool const& aDescriptorPool, lut::DescriptorSetLayout const& aObjectLayout, lut::PipelineLayout const& aPipelineLayout, lut::Pipeline const& aPipeline)
+	{
+		std::vector<GPUModel> models;
+		models.reserve(cfg::kModels.size());
+		for (auto& modelPath : cfg::kModels)
+		{
+			auto model = load_obj_model(modelPath);
+			// Populate materials
+			std::vector<GPUMaterialInfo> materials;
+			materials.reserve(model.materials.size());
+			for (auto& materialInfo : model.materials)
+			{
+				// Get the material in suitable format for uniform
+				// For PBR
+				glsl::MaterialUniform material = { glm::vec4(materialInfo.emissive, 1.0f),
+													glm::vec4(materialInfo.albedo, 1.0f),
+													materialInfo.shininess,
+													materialInfo.metalness };
+
+				// Allocate a descriptor set for this material
+				VkDescriptorSet matDescSet;
+				lut::Buffer matUBO;
+				const VkPipeline* pipe;
+				const VkPipelineLayout* pipeLayout;
+
+				matDescSet = lut::alloc_desc_set(aWindow, aDescriptorPool.handle, aObjectLayout.handle);
+
+				// Set appropriate pipeline pointers for no textures
+				pipe = &aPipeline.handle;
+				pipeLayout = &aPipelineLayout.handle;
+
+				// Transfer material uniform
+				{
+					// Initialise it
+					matUBO = lut::create_buffer(
+						aAllocator,
+						sizeof(glsl::MaterialUniform),
+						VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+						VMA_MEMORY_USAGE_GPU_ONLY
+					);
+					// Staging buffer, which will be used to transfer data from the CPU to the GPU
+					lut::Buffer matUBOStaging = lut::create_buffer(
+						aAllocator,
+						sizeof(glsl::MaterialUniform),
+						VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+						VMA_MEMORY_USAGE_CPU_TO_GPU
+					);
+					VkWriteDescriptorSet writeDesc[1]{};
+
+					VkDescriptorBufferInfo bufferInfo{};
+					bufferInfo.buffer = matUBO.buffer;
+					bufferInfo.range = VK_WHOLE_SIZE;
+
+					writeDesc[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+					writeDesc[0].dstSet = matDescSet;
+					writeDesc[0].dstBinding = 1;
+					writeDesc[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+					writeDesc[0].descriptorCount = 1;
+					writeDesc[0].pBufferInfo = &bufferInfo;
+
+					constexpr auto numSets = sizeof(writeDesc) / sizeof(writeDesc[0]);
+					vkUpdateDescriptorSets(aWindow.device, numSets, writeDesc, 0, nullptr);
+
+					// Write to the new uniform
+					void* uniformPtr = nullptr;
+					if (auto const res = vmaMapMemory(aAllocator.allocator, matUBOStaging.allocation, &uniformPtr); VK_SUCCESS != res)
+					{
+						throw lut::Error("Error mapping memory for writing\n"
+							"vmaMapMemory() returned %s", lut::to_string(res).c_str()
+						);
+					}
+
+					std::memcpy(uniformPtr, &material, sizeof(glsl::MaterialUniform));
+					vmaUnmapMemory(aAllocator.allocator, matUBOStaging.allocation);
+
+					// Now, we need to prepare to issue the transfer commands that will copy the data from the staging buffers to the GPU buffers
+					// We need a fence to block here while the Vulkan commands are executed. We don't want to delete the resources while
+					// ..the gpu is still using them...
+					lut::Fence uploadComplete = create_fence(aWindow);
+
+					// Queue data uploads from staging buffers to the final buffers
+					// This uses a seperate command pool for simplicity
+					lut::CommandPool uploadPool = create_command_pool(aWindow);
+					VkCommandBuffer uploadCmd = alloc_command_buffer(aWindow, uploadPool.handle);
+
+					// Record the copy commands into the buffer
+					VkCommandBufferBeginInfo beginInfo{};
+					beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+					beginInfo.flags = 0;
+					beginInfo.pInheritanceInfo = nullptr;
+
+					if (auto const res = vkBeginCommandBuffer(uploadCmd, &beginInfo); VK_SUCCESS != res)
+					{
+						throw lut::Error("Beginning command buffer recording\n"
+							"vkBeginCommandBuffer() returned %s", lut::to_string(res).c_str()
+						);
+					}
+
+					VkBufferCopy matUBOCopy{};
+					matUBOCopy.size = sizeof(glsl::MaterialUniform);
+
+					lut::buffer_barrier(uploadCmd,
+						matUBO.buffer,
+						VK_ACCESS_UNIFORM_READ_BIT,
+						VK_ACCESS_TRANSFER_WRITE_BIT,
+						VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+						VK_PIPELINE_STAGE_TRANSFER_BIT
+					);
+
+					vkCmdCopyBuffer(uploadCmd, matUBOStaging.buffer, matUBO.buffer, 1, &matUBOCopy);
+
+					lut::buffer_barrier(uploadCmd,
+						matUBO.buffer,
+						VK_ACCESS_TRANSFER_WRITE_BIT,
+						VK_ACCESS_UNIFORM_READ_BIT,
+						VK_PIPELINE_STAGE_TRANSFER_BIT,
+						VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+					);
+
+					if (auto const res = vkEndCommandBuffer(uploadCmd); VK_SUCCESS != res)
+					{
+						throw lut::Error("Ending command buffer recording\n"
+							"vkEndCommandBuffer() returned %s", lut::to_string(res).c_str()
+						);
+					}
+
+					VkSubmitInfo submitInfo{};
+					submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+					submitInfo.commandBufferCount = 1;
+					submitInfo.pCommandBuffers = &uploadCmd;
+
+					if (auto const res = vkQueueSubmit(aWindow.graphicsQueue, 1, &submitInfo, uploadComplete.handle); VK_SUCCESS != res)
+					{
+						throw lut::Error("SUbmitting commands\n"
+							"vkQueueSubmit() returned %s", lut::to_string(res).c_str()
+						);
+					}
+
+					// Wait for commands to finish before destroying the temp resources
+					// We don't need to destroy them explicitly, they are handled by their respective destructors
+					// But we do need to block here until we are ready for these to be called
+					if (auto const res = vkWaitForFences(aWindow.device, 1, &uploadComplete.handle, VK_TRUE, std::numeric_limits<std::uint64_t>::max()); VK_SUCCESS != res)
+					{
+						throw lut::Error("Waiting for upload to complete\n"
+							"vkWaitForFences() returned %s", lut::to_string(res).c_str()
+						);
+					}
+				}
+
+				// Pass ownership to GPUMaterialInfo
+				materials.emplace_back(
+					GPUMaterialInfo{
+						pipe,
+						pipeLayout,
+						std::move(matUBO),
+						std::move(matDescSet)
+					}
+				);
+
+				// materials.emplace_back(materialInfo.color);
+			}
+
+			// Send to gpu buffers
+			models.push_back(load_gpu_model(aWindow, aAllocator, model, std::move(materials)));
+		}
+
+		return models;
+	}
+
+	lut::Buffer prepare_scene_buffer(lut::VulkanWindow const& aWindow, lut::Allocator const& aAllocator, VkDescriptorSet const& aSceneDescriptors)
+	{
+		// Create UBO for projection matrix
+		lut::Buffer sceneUBO = lut::create_buffer(
+			aAllocator,
+			sizeof(glsl::SceneUniform),
+			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VMA_MEMORY_USAGE_CPU_TO_GPU
+		);
+
+		// Initialize scene descriptor set with vkUpdateDescriptorSets
+		// Write to the descriptor set to specify its details
+		{
+			VkWriteDescriptorSet desc[1]{};
+
+			VkDescriptorBufferInfo sceneUboInfo{};
+			sceneUboInfo.buffer = sceneUBO.buffer;
+			sceneUboInfo.range = VK_WHOLE_SIZE;
+
+			desc[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			desc[0].dstSet = aSceneDescriptors;
+			desc[0].dstBinding = 0;
+			desc[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			desc[0].descriptorCount = 1;
+			desc[0].pBufferInfo = &sceneUboInfo;
+
+
+			constexpr auto numSets = sizeof(desc) / sizeof(desc[0]);
+			vkUpdateDescriptorSets(aWindow.device, numSets, desc, 0, nullptr);
+		}
+
+		return sceneUBO;
+	}
+
+	lut::Buffer prepare_light_buffer(lut::VulkanWindow const& aWindow, lut::Allocator const& aAllocator, VkDescriptorSet const& aLightDescriptors, glsl::LightUniform& aLightUniform)
+	{
+			lut::Buffer lightUBO = lut::create_buffer(
+			aAllocator,
+			sizeof(glsl::LightUniform),
+			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VMA_MEMORY_USAGE_CPU_TO_GPU
+		);
+
+		// Initialise light descriptor set with vkUpdateDescriptorSets
+		{
+			VkWriteDescriptorSet desc[1]{};
+
+			VkDescriptorBufferInfo lightUboInfo{};
+			lightUboInfo.buffer = lightUBO.buffer;
+			lightUboInfo.range = VK_WHOLE_SIZE;
+
+			desc[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			desc[0].dstSet = aLightDescriptors;
+			desc[0].dstBinding = 2;
+			desc[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			desc[0].descriptorCount = 1;
+			desc[0].pBufferInfo = &lightUboInfo;
+
+
+			constexpr auto numSets = sizeof(desc) / sizeof(desc[0]);
+			vkUpdateDescriptorSets(aWindow.device, numSets, desc, 0, nullptr);
+		}
+
+		// Create a sphere from which to sample light positions
+		cfg::Sphere sphere = { glm::vec3(0.0f),
+								7.0f };
+
+		// Create random sampler
+		std::random_device randomDevice;
+		std::default_random_engine randomEngine(randomDevice());
+		std::uniform_real_distribution<> uniformDistribution(0.0f, 360.0f);
+
+		aLightUniform.ambientColor = glm::vec4(0.02f, 0.02f, 0.02f, 1.0f);
+
+		float theta = 0.0f, phi = 0.0f;
+
+		for (size_t i = 0; i < glsl::MAX_LIGHTS; i++)
+		{
+			theta = uniformDistribution(randomEngine);
+			phi = uniformDistribution(randomEngine);
+			// Sample a new point from the sphere and make a light
+			glm::vec3 cartesian = sphere.center +
+				glm::vec3(sphere.radius * sin(phi) * cos(theta),
+					sphere.radius * sin(phi) * sin(theta),
+					sphere.radius * cos(phi)
+				);
+
+			// Add the light to the UBO
+			aLightUniform.lights[i] = { glm::vec4(cartesian, 1.0f),
+										glm::vec4((bool)(1 & (i + 1)), (bool)(2 & (i + 1)), (bool)(4 & (i + 1)), 1.0f)
+			};
+
+			aLightUniform.numLights++;
+			lightState.numLightsEnabled = aLightUniform.numLights;
+		}
+
+		return lightUBO;
+	}
+
 	void update_scene_uniforms(glsl::SceneUniform& aSceneUniforms, std::uint32_t aFramebufferWidth, std::uint32_t aFramebufferHeight)
 	{
 		float const aspect = float(aFramebufferWidth) / float(aFramebufferHeight);
@@ -969,7 +957,7 @@ namespace
 		aLightUniform.reflectionModel = aLightState.reflectionModel;
 	}
 
-	lut::RenderPass create_render_pass(lut::VulkanWindow const& aWindow)
+	lut::RenderPass create_offscreen_render_pass(lut::VulkanWindow const& aWindow)
 	{
 		// Render Pass Attachments
 		VkAttachmentDescription attachments[2]{};
