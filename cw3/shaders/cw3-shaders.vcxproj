@@ -90,6 +90,20 @@
       <Outputs>../../assets/cw3/shaders/default.vert.spv</Outputs>
       <Message>GLSLC: [VERT] '%(Filename)%(Extension)'</Message>
     </CustomBuild>
+    <CustomBuild Include="deferred.frag">
+      <FileType>Document</FileType>
+      <Command>IF NOT EXIST "$(SolutionDir)\assets\cw3\shaders" (mkdir "$(SolutionDir)\assets\cw3\shaders")
+"$(SolutionDir)/third_party/shaderc/win-x86_64/glslc.exe" -O -o "$(SolutionDir)/assets/cw3/shaders/%(Filename)%(Extension).spv" "%(Identity)"</Command>
+      <Outputs>../../assets/cw3/shaders/deferred.frag.spv</Outputs>
+      <Message>GLSLC: [FRAG] '%(Filename)%(Extension)'</Message>
+    </CustomBuild>
+    <CustomBuild Include="deferred.vert">
+      <FileType>Document</FileType>
+      <Command>IF NOT EXIST "$(SolutionDir)\assets\cw3\shaders" (mkdir "$(SolutionDir)\assets\cw3\shaders")
+"$(SolutionDir)/third_party/shaderc/win-x86_64/glslc.exe" -O -o "$(SolutionDir)/assets/cw3/shaders/%(Filename)%(Extension).spv" "%(Identity)"</Command>
+      <Outputs>../../assets/cw3/shaders/deferred.vert.spv</Outputs>
+      <Message>GLSLC: [VERT] '%(Filename)%(Extension)'</Message>
+    </CustomBuild>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
