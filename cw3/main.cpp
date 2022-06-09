@@ -54,10 +54,10 @@ namespace
 		//constexpr char const* kVertShaderPath = SHADERDIR_ "BlinnPhong.vert.spv";
 		//constexpr char const* kFragShaderPath = SHADERDIR_ "BlinnPhong.frag.spv";
 
-		constexpr char const* kOffscreenVertShaderPath = SHADERDIR_ "PBR.vert.spv";
-		constexpr char const* kOffscreenFragShaderPath = SHADERDIR_ "PBR.frag.spv";
+		constexpr char const* kOffscreenVertShaderPath = SHADERDIR_ "deferred_early_pass.vert.spv";
+		constexpr char const* kOffscreenFragShaderPath = SHADERDIR_ "deferred_early_pass.frag.spv";
 		constexpr char const* kDeferredVertShaderPath = SHADERDIR_ "deferred.vert.spv";
-		constexpr char const* kDeferredFragShaderPath = SHADERDIR_ "deferred.frag.spv";
+		constexpr char const* kDeferredFragShaderPath = SHADERDIR_ "deferred_pbr.frag.spv";
 #		undef SHADERDIR_
 
 		// Paths for the kModels
@@ -176,7 +176,10 @@ namespace
 	struct OffscreenFrameBuffer {
 		int32_t width, height;
 		lut::Framebuffer frameBuffer;
-		FrameBufferAttachment passthru;
+		FrameBufferAttachment position;
+		FrameBufferAttachment normal;
+		FrameBufferAttachment albedo_specular;
+		FrameBufferAttachment emissive_metalness;
 		FrameBufferAttachment depth;
 		lut::RenderPass renderPass;
 		lut::Sampler sampler;
@@ -189,7 +192,7 @@ namespace
 
 	// Helpers:
 	lut::RenderPass create_deferred_render_pass(lut::VulkanWindow const&);
-	lut::RenderPass create_composition_render_pass(lut::VulkanWindow const&);
+	
 
 	// Offscreen Pass Descriptors
 	lut::DescriptorSetLayout create_scene_descriptor_layout(lut::VulkanWindow const&);
@@ -1275,15 +1278,17 @@ namespace
 		depthInfo.maxDepthBounds = 1.0f;
 
 		// Colour blend state. These are defined per colour attachement, of which we have one, so we only need one state:
-		VkPipelineColorBlendAttachmentState blendStates[1]{};
+		VkPipelineColorBlendAttachmentState blendStates[4]{};
 		blendStates[0].blendEnable = VK_FALSE;
 		blendStates[0].colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
 			| VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 
+		blendStates[1] = blendStates[2] = blendStates[3] = blendStates[0];
+
 		VkPipelineColorBlendStateCreateInfo blendInfo{};
 		blendInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
 		blendInfo.logicOpEnable = VK_FALSE;
-		blendInfo.attachmentCount = 1;
+		blendInfo.attachmentCount = 4;
 		blendInfo.pAttachments = blendStates;
 
 		// Dynamic state: not used here, can also be left as nullptr
@@ -1482,13 +1487,40 @@ namespace
 		aOffscreenFrameBuffer.width = aWindow.swapchainExtent.width;
 		aOffscreenFrameBuffer.height = aWindow.swapchainExtent.height;
 
-		// Single colour attachment for passthru
+		// Match framebuffer struct
 		create_attachment(
 			aAllocator,
 			aWindow,
-			VK_FORMAT_B8G8R8A8_SRGB,
+			VK_FORMAT_R32G32B32A32_SFLOAT,
 			VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-			aOffscreenFrameBuffer.passthru,
+			aOffscreenFrameBuffer.position,
+			aOffscreenFrameBuffer
+		);
+
+		create_attachment(
+			aAllocator,
+			aWindow,
+			VK_FORMAT_R32G32B32A32_SFLOAT,
+			VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+			aOffscreenFrameBuffer.normal,
+			aOffscreenFrameBuffer
+		);
+
+		create_attachment(
+			aAllocator,
+			aWindow,
+			VK_FORMAT_R32G32B32A32_SFLOAT,
+			VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+			aOffscreenFrameBuffer.albedo_specular,
+			aOffscreenFrameBuffer
+		);
+
+		create_attachment(
+			aAllocator,
+			aWindow,
+			VK_FORMAT_R32G32B32A32_SFLOAT,
+			VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+			aOffscreenFrameBuffer.emissive_metalness,
 			aOffscreenFrameBuffer
 		);
 
@@ -1503,7 +1535,7 @@ namespace
 		);
 
 		// Initialise attachments for each
-		constexpr unsigned int numAttachments = 2;
+		constexpr unsigned int numAttachments = 5;
 		std::array<VkAttachmentDescription, numAttachments> attachmentDescs = {};
 
 		for (size_t i = 0; i < numAttachments; i++)
@@ -1529,8 +1561,11 @@ namespace
 		}
 
 		// Set formats
-		attachmentDescs[0].format = aOffscreenFrameBuffer.passthru.format;
-		attachmentDescs[1].format = aOffscreenFrameBuffer.depth.format;
+		attachmentDescs[0].format = aOffscreenFrameBuffer.position.format;
+		attachmentDescs[1].format = aOffscreenFrameBuffer.normal.format;
+		attachmentDescs[2].format = aOffscreenFrameBuffer.albedo_specular.format;
+		attachmentDescs[3].format = aOffscreenFrameBuffer.emissive_metalness.format;
+		attachmentDescs[4].format = aOffscreenFrameBuffer.depth.format;
 
 		std::array<VkAttachmentReference, numAttachments - 1> colorReferences;
 		for (uint32_t i = 0; i < numAttachments - 1; i++)
@@ -1576,8 +1611,11 @@ namespace
 		aOffscreenFrameBuffer.renderPass = lut::RenderPass(aWindow.device, pass);
 
 		std::array<VkImageView, numAttachments> attachments;
-		attachments[0] = aOffscreenFrameBuffer.passthru.view.handle;
-		attachments[1] = aOffscreenFrameBuffer.depth.view.handle;
+		attachments[0] = aOffscreenFrameBuffer.position.view.handle;
+		attachments[1] = aOffscreenFrameBuffer.normal.view.handle;
+		attachments[2] = aOffscreenFrameBuffer.albedo_specular.view.handle;
+		attachments[3] = aOffscreenFrameBuffer.emissive_metalness.view.handle;
+		attachments[4] = aOffscreenFrameBuffer.depth.view.handle;
 
 		VkFramebufferCreateInfo fbCreateInfo{};
 		fbCreateInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -1769,11 +1807,26 @@ namespace
 
 	lut::DescriptorSetLayout create_g_buffer_descriptor_layout(lut::VulkanWindow const& aWindow)
 	{
-		VkDescriptorSetLayoutBinding bindings[1]{};
+		VkDescriptorSetLayoutBinding bindings[4]{};
 		bindings[0].binding = 0;
 		bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		bindings[0].descriptorCount = 1;
 		bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // used ONLY in the fragment shader!
+
+		bindings[1].binding = 1;
+		bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		bindings[1].descriptorCount = 1;
+		bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // used ONLY in the fragment shader!
+
+		bindings[2].binding = 2;
+		bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		bindings[2].descriptorCount = 1;
+		bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // used ONLY in the fragment shader!
+
+		bindings[3].binding = 3;
+		bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		bindings[3].descriptorCount = 1;
+		bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // used ONLY in the fragment shader!
 
 		VkDescriptorSetLayoutCreateInfo layoutInfo{};
 		layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1797,17 +1850,29 @@ namespace
 		VkWriteDescriptorSet writeDescriptorSet{};
 
 		// Image descriptions
-		VkDescriptorImageInfo descriptorPassthru{};
-		descriptorPassthru.sampler = aOffscreenFramebuffer.sampler.handle;
-		descriptorPassthru.imageView = aOffscreenFramebuffer.passthru.view.handle;
-		descriptorPassthru.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		std::array<VkDescriptorImageInfo, 4> descriptorPassthru{};
+		descriptorPassthru[0].sampler = aOffscreenFramebuffer.sampler.handle;
+		descriptorPassthru[0].imageView = aOffscreenFramebuffer.position.view.handle;
+		descriptorPassthru[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		descriptorPassthru[1].sampler = aOffscreenFramebuffer.sampler.handle;
+		descriptorPassthru[1].imageView = aOffscreenFramebuffer.normal.view.handle;
+		descriptorPassthru[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		descriptorPassthru[2].sampler = aOffscreenFramebuffer.sampler.handle;
+		descriptorPassthru[2].imageView = aOffscreenFramebuffer.albedo_specular.view.handle;
+		descriptorPassthru[2].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		descriptorPassthru[3].sampler = aOffscreenFramebuffer.sampler.handle;
+		descriptorPassthru[3].imageView = aOffscreenFramebuffer.emissive_metalness.view.handle;
+		descriptorPassthru[3].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 		writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writeDescriptorSet.dstSet = aOffscreenDescriptor;
 		writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		writeDescriptorSet.dstBinding = 0;
-		writeDescriptorSet.pImageInfo = &descriptorPassthru;
-		writeDescriptorSet.descriptorCount = 1;
+		writeDescriptorSet.pImageInfo = descriptorPassthru.data();
+		writeDescriptorSet.descriptorCount = 4;
 
 		vkUpdateDescriptorSets(aWindow.device, 1, &writeDescriptorSet, 0, nullptr);
 	}
@@ -2082,13 +2147,14 @@ namespace
 		);
 
 		// Begin render pass
-		VkClearValue clearValues[2]{};
-		clearValues[0].color.float32[0] = 0.1f;
-		clearValues[0].color.float32[1] = 0.1f;
-		clearValues[0].color.float32[2] = 0.1f;
-		clearValues[0].color.float32[3] = 0.1f;
+		// Set clear values for each buffer. Use 0 for all but albedo
+		VkClearValue clearValues[5]{};
+		clearValues[2].color.float32[0] = 0.1f;
+		clearValues[2].color.float32[1] = 0.1f;
+		clearValues[2].color.float32[2] = 0.1f;
+		clearValues[2].color.float32[3] = 0.1f;
 
-		clearValues[1].depthStencil.depth = 1.0f;
+		clearValues[4].depthStencil.depth = 1.0f;
 
 		VkRenderPassBeginInfo passInfo{};
 		passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2096,7 +2162,7 @@ namespace
 		passInfo.framebuffer = aFramebuffer;
 		passInfo.renderArea.offset = VkOffset2D{ 0, 0 };
 		passInfo.renderArea.extent = aImageExtent;
-		passInfo.clearValueCount = 2;
+		passInfo.clearValueCount = 5;
 		passInfo.pClearValues = clearValues;
 
 		vkCmdBeginRenderPass(aCmdBuff, &passInfo, VK_SUBPASS_CONTENTS_INLINE);
