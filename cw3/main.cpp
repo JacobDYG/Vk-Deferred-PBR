@@ -213,15 +213,6 @@ namespace
 	lut::Pipeline create_offscreen_pipeline(lut::VulkanWindow const&, VkRenderPass, VkPipelineLayout, const char* aVertexShader, const char* aFragmentShader);
 	lut::Pipeline create_deferred_pipeline(lut::VulkanWindow const&, VkRenderPass, VkPipelineLayout, const char* aVertexShader, const char* aFragmentShader);
 
-	//std::tuple<lut::Image, lut::ImageView> create_depth_buffer(lut::VulkanWindow const&, lut::Allocator const&);
-
-	//void create_swapchain_framebuffers(
-	//	lut::VulkanWindow const&,
-	//	VkRenderPass,
-	//	std::vector<lut::Framebuffer>&,
-	//	VkImageView aDepthView
-	//);
-
 	// Depth no longer needed
 	void create_swapchain_framebuffers(
 		lut::VulkanWindow const&,
@@ -266,9 +257,6 @@ namespace
 		VkBuffer aSceneUBO,
 		glsl::SceneUniform aSceneUniform,
 		VkDescriptorSet aSceneDescriptors,
-		VkBuffer aLightUBO,
-		glsl::LightUniform aLightUniform,
-		VkDescriptorSet aLightDescriptors,
 		std::vector<GPUModel>* models
 	);
 
@@ -287,7 +275,13 @@ namespace
 		VkPipeline aGraphicsPipe, 
 		VkPipelineLayout aGraphicsPipelineLayout, 
 		VkExtent2D const& aImageExtent, 
-		VkDescriptorSet const& aDescriptorSet
+		VkDescriptorSet const& aDescriptorSet, 
+		VkBuffer aSceneUBO, 
+		glsl::SceneUniform aSceneUniform, 
+		VkDescriptorSet aSceneDescriptors, 
+		VkBuffer aLightUBO, 
+		glsl::LightUniform aLightUniform, 
+		VkDescriptorSet aLightDescriptors
 	);
 
 	void submit_deferred_commands(
@@ -363,32 +357,38 @@ int main() try
 
 	// Copy descriptor sets into a vector for pipeline creation
 	// It is imperative that the descriptor set order matches the binding order in the shaders
-	std::vector<VkDescriptorSetLayout> descriptorSetLayouts;
+	std::vector<VkDescriptorSetLayout> earlyPassDescriptorSetLayouts;
 
 	// Allocate a descriptor set for all vertex shaders
 	// Hence the name 'scene' as it's global
 	// This simply contains a camera/projection matrix, as we aren't dealing with
 	// ...any other transformations for now, such as on the object itself.
 	lut::DescriptorSetLayout sceneLayout = create_scene_descriptor_layout(window);
-	descriptorSetLayouts.push_back(sceneLayout.handle);
+	earlyPassDescriptorSetLayouts.push_back(sceneLayout.handle);
 
 	// Allocate two descriptor sets, one for materials, and one for lights
 	// The light descriptor set will be the same across all objects
 	// It is also convenient to keep them seperate as we will need to update the light descriptor set on each frame later, when animation is added
 	lut::DescriptorSetLayout defaultObjectLayout = create_defaultobject_descriptor_layout(window);
-	descriptorSetLayouts.push_back(defaultObjectLayout.handle);
-	lut::DescriptorSetLayout lightLayout = create_light_descriptor_layout(window);
-	descriptorSetLayouts.push_back(lightLayout.handle);
+	earlyPassDescriptorSetLayouts.push_back(defaultObjectLayout.handle);
+
 
 	// Create pipelines
-	lut::PipelineLayout offscreenPipeLayout = create_pipeline_layout(window, descriptorSetLayouts);
+	lut::PipelineLayout offscreenPipeLayout = create_pipeline_layout(window, earlyPassDescriptorSetLayouts);
 	lut::Pipeline offscreenPipeline = create_offscreen_pipeline(window, offscreenPass->handle, offscreenPipeLayout.handle, cfg::kOffscreenVertShaderPath, cfg::kOffscreenFragShaderPath);
 
 	// Create deferred pipeline
+	std::vector<VkDescriptorSetLayout> deferredPassDescriptorSetLayouts;
+	deferredPassDescriptorSetLayouts.push_back(sceneLayout.handle);
+	lut::DescriptorSetLayout lightLayout = create_light_descriptor_layout(window);
+	deferredPassDescriptorSetLayouts.push_back(lightLayout.handle);
 	lut::DescriptorSetLayout gBuffLayout = create_g_buffer_descriptor_layout(window);
+	deferredPassDescriptorSetLayouts.push_back(gBuffLayout.handle);
+
+
 	VkDescriptorSet gBuffDescSet = lut::alloc_desc_set(window, descPool.handle, gBuffLayout.handle);
 	write_offscreen_set(window, allocator, gBuffDescSet, offscreenBuffer);
-	lut::PipelineLayout deferredPipeLayout = create_pipeline_layout(window, std::vector<VkDescriptorSetLayout> { gBuffLayout.handle });
+	lut::PipelineLayout deferredPipeLayout = create_pipeline_layout(window, deferredPassDescriptorSetLayouts);
 	lut::Pipeline deferredPipeline = create_deferred_pipeline(window, deferredPass.handle, deferredPipeLayout.handle, cfg::kDeferredVertShaderPath, cfg::kDeferredFragShaderPath);
 
 	// Load models
@@ -528,9 +528,6 @@ int main() try
 			sceneUBO.buffer,
 			sceneUniforms,
 			sceneDescriptors,
-			lightUBO.buffer,
-			lightUniforms,
-			lightDescriptors,
 			&models
 		);
 
@@ -566,7 +563,13 @@ int main() try
 			deferredPipeline.handle,
 			deferredPipeLayout.handle,
 			window.swapchainExtent,
-			gBuffDescSet
+			gBuffDescSet,
+			sceneUBO.buffer,
+			sceneUniforms,
+			sceneDescriptors,
+			lightUBO.buffer,
+			lightUniforms,
+			lightDescriptors
 		);
 
 		submit_deferred_commands(
@@ -1002,7 +1005,7 @@ namespace
 
 			desc[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 			desc[0].dstSet = aLightDescriptors;
-			desc[0].dstBinding = 2;
+			desc[0].dstBinding = 1;
 			desc[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 			desc[0].descriptorCount = 1;
 			desc[0].pBufferInfo = &lightUboInfo;
@@ -1784,7 +1787,7 @@ namespace
 	lut::DescriptorSetLayout create_light_descriptor_layout(lut::VulkanWindow const& aWindow)
 	{
 		VkDescriptorSetLayoutBinding bindings[1]{};
-		bindings[0].binding = 2;
+		bindings[0].binding = 1;
 		bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 		bindings[0].descriptorCount = 1;
 		bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // used ONLY in the fragment shader!
@@ -1808,22 +1811,22 @@ namespace
 	lut::DescriptorSetLayout create_g_buffer_descriptor_layout(lut::VulkanWindow const& aWindow)
 	{
 		VkDescriptorSetLayoutBinding bindings[4]{};
-		bindings[0].binding = 0;
+		bindings[0].binding = 2;
 		bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		bindings[0].descriptorCount = 1;
 		bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // used ONLY in the fragment shader!
 
-		bindings[1].binding = 1;
+		bindings[1].binding = 3;
 		bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		bindings[1].descriptorCount = 1;
 		bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // used ONLY in the fragment shader!
 
-		bindings[2].binding = 2;
+		bindings[2].binding = 4;
 		bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		bindings[2].descriptorCount = 1;
 		bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // used ONLY in the fragment shader!
 
-		bindings[3].binding = 3;
+		bindings[3].binding = 5;
 		bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		bindings[3].descriptorCount = 1;
 		bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; // used ONLY in the fragment shader!
@@ -1870,7 +1873,7 @@ namespace
 		writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		writeDescriptorSet.dstSet = aOffscreenDescriptor;
 		writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		writeDescriptorSet.dstBinding = 0;
+		writeDescriptorSet.dstBinding = 2;
 		writeDescriptorSet.pImageInfo = descriptorPassthru.data();
 		writeDescriptorSet.descriptorCount = 4;
 
@@ -2091,7 +2094,7 @@ namespace
 	}
 
 	void record_offscreen_commands(VkCommandBuffer aCmdBuff, VkRenderPass aRenderPass, VkFramebuffer aFramebuffer, VkPipeline aGraphicsPipe, VkPipelineLayout aGraphicsPipelineLayout, VkExtent2D const& aImageExtent,
-		VkBuffer aSceneUBO, glsl::SceneUniform aSceneUniform, VkDescriptorSet aSceneDescriptors, VkBuffer aLightUBO, glsl::LightUniform aLightUniform, VkDescriptorSet aLightDescriptors, std::vector<GPUModel>* models)
+		VkBuffer aSceneUBO, glsl::SceneUniform aSceneUniform, VkDescriptorSet aSceneDescriptors, std::vector<GPUModel>* models)
 	{
 		// Begin recording commands
 		VkCommandBufferBeginInfo beginInfo{};
@@ -2121,25 +2124,6 @@ namespace
 
 		lut::buffer_barrier(aCmdBuff,
 			aSceneUBO,
-			VK_ACCESS_TRANSFER_WRITE_BIT,
-			VK_ACCESS_UNIFORM_READ_BIT,
-			VK_PIPELINE_STAGE_TRANSFER_BIT,
-			VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
-		);
-
-		// Update the light uniforms, same as above
-		lut::buffer_barrier(aCmdBuff,
-			aLightUBO,
-			VK_ACCESS_UNIFORM_READ_BIT,
-			VK_ACCESS_TRANSFER_WRITE_BIT,
-			VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
-			VK_PIPELINE_STAGE_TRANSFER_BIT
-		);
-
-		vkCmdUpdateBuffer(aCmdBuff, aLightUBO, 0, sizeof(glsl::LightUniform), &aLightUniform);
-
-		lut::buffer_barrier(aCmdBuff,
-			aLightUBO,
 			VK_ACCESS_TRANSFER_WRITE_BIT,
 			VK_ACCESS_UNIFORM_READ_BIT,
 			VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -2180,7 +2164,6 @@ namespace
 				// Bind the global desc set
 				vkCmdBindDescriptorSets(aCmdBuff, VK_PIPELINE_BIND_POINT_GRAPHICS, *(material->pipeLayout), 0, 1, &aSceneDescriptors, 0, nullptr);
 				vkCmdBindDescriptorSets(aCmdBuff, VK_PIPELINE_BIND_POINT_GRAPHICS, *(material->pipeLayout), 1, 1, &(material->materialDescriptor), 0, nullptr);
-				vkCmdBindDescriptorSets(aCmdBuff, VK_PIPELINE_BIND_POINT_GRAPHICS, *(material->pipeLayout), 2, 1, &aLightDescriptors, 0, nullptr);
 				vkCmdBindVertexBuffers(aCmdBuff, 0, 3, buffers, offsets);
 				vkCmdDraw(aCmdBuff, mesh.numberOfVertices, 1, mesh.vertexStartIndex, 0);
 			}
@@ -2226,7 +2209,8 @@ namespace
 		}
 	}
 
-	void record_deferred_commands(VkCommandBuffer aCmdBuff, VkRenderPass aRenderPass, VkFramebuffer aFramebuffer, VkPipeline aGraphicsPipe, VkPipelineLayout aGraphicsPipelineLayout, VkExtent2D const& aImageExtent, VkDescriptorSet const& aDescriptorSet)
+	void record_deferred_commands(VkCommandBuffer aCmdBuff, VkRenderPass aRenderPass, VkFramebuffer aFramebuffer, VkPipeline aGraphicsPipe, VkPipelineLayout aGraphicsPipelineLayout, VkExtent2D const& aImageExtent, VkDescriptorSet const& aGBufferDescriptorSet,
+		VkBuffer aSceneUBO, glsl::SceneUniform aSceneUniform, VkDescriptorSet aSceneDescriptors, VkBuffer aLightUBO, glsl::LightUniform aLightUniform, VkDescriptorSet aLightDescriptors)
 	{
 		// Begin recording commands
 		VkCommandBufferBeginInfo beginInfo{};
@@ -2239,6 +2223,43 @@ namespace
 			throw lut::Error("Unable to begin recording command buffer\n"
 				"vkBeginCommandBuffer() returned %s", lut::to_string(res).c_str());
 		}
+
+		lut::buffer_barrier(aCmdBuff,
+			aSceneUBO,
+			VK_ACCESS_UNIFORM_READ_BIT,
+			VK_ACCESS_TRANSFER_WRITE_BIT,
+			VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT
+		);
+
+		vkCmdUpdateBuffer(aCmdBuff, aSceneUBO, 0, sizeof(glsl::SceneUniform), &aSceneUniform);
+
+		lut::buffer_barrier(aCmdBuff,
+			aSceneUBO,
+			VK_ACCESS_TRANSFER_WRITE_BIT,
+			VK_ACCESS_UNIFORM_READ_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
+		);
+
+		// Update the light uniforms, same as above
+		lut::buffer_barrier(aCmdBuff,
+			aLightUBO,
+			VK_ACCESS_UNIFORM_READ_BIT,
+			VK_ACCESS_TRANSFER_WRITE_BIT,
+			VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT
+		);
+
+		vkCmdUpdateBuffer(aCmdBuff, aLightUBO, 0, sizeof(glsl::LightUniform), &aLightUniform);
+
+		lut::buffer_barrier(aCmdBuff,
+			aLightUBO,
+			VK_ACCESS_TRANSFER_WRITE_BIT,
+			VK_ACCESS_UNIFORM_READ_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
+		);
 
 		// Begin render pass
 		VkClearValue clearValues[1]{};
@@ -2259,7 +2280,9 @@ namespace
 		vkCmdBeginRenderPass(aCmdBuff, &passInfo, VK_SUBPASS_CONTENTS_INLINE);
 
 		vkCmdBindPipeline(aCmdBuff, VK_PIPELINE_BIND_POINT_GRAPHICS, aGraphicsPipe);
-		vkCmdBindDescriptorSets(aCmdBuff, VK_PIPELINE_BIND_POINT_GRAPHICS, aGraphicsPipelineLayout, 0, 1, &aDescriptorSet, 0, nullptr);
+		vkCmdBindDescriptorSets(aCmdBuff, VK_PIPELINE_BIND_POINT_GRAPHICS, aGraphicsPipelineLayout, 0, 1, &aSceneDescriptors, 0, nullptr);
+		vkCmdBindDescriptorSets(aCmdBuff, VK_PIPELINE_BIND_POINT_GRAPHICS, aGraphicsPipelineLayout, 1, 1, &aLightDescriptors, 0, nullptr);
+		vkCmdBindDescriptorSets(aCmdBuff, VK_PIPELINE_BIND_POINT_GRAPHICS, aGraphicsPipelineLayout, 2, 1, &aGBufferDescriptorSet, 0, nullptr);
 		vkCmdDraw(aCmdBuff, 3, 1, 0, 0);
 
 		// End the render pass

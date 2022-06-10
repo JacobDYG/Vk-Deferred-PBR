@@ -4,14 +4,6 @@ layout(location = 0) in vec3 inV3fFragPosition;
 layout(location = 1) in vec3 inV3fNormal;
 layout(location = 2) in vec2 inV2fTexCoord;
 
-layout(set = 0, binding = 0) uniform UScene
-{
-	mat4 camera;
-	mat4 projection;
-	mat4 projCam;
-	vec3 cameraPosition;
-} uScene;
-
 // PBR material
 layout(set = 1, binding = 1) uniform UMaterial
 {
