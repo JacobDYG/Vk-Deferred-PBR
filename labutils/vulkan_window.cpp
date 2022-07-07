@@ -193,7 +193,7 @@ namespace labutils
 		// create GLFW window
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
-		ret.window = glfwCreateWindow(1280, 720, "COMP5822M Coursework 1", nullptr, nullptr);
+		ret.window = glfwCreateWindow(1280, 720, "Renderer", nullptr, nullptr);
 		if (!ret.window)
 		{
 			char const* errMsg = nullptr;
